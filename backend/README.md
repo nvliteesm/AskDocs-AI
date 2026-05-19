@@ -35,10 +35,10 @@ GEMINI_API_KEY=your_gemini_api_key
 ```
 
 ## Run locally
-python -m venv venv
-venv\Scripts\Activate.ps1
-python -m pip install -r requirements.txt
-uvicorn app.main:app --reload
+1. python -m venv venv
+2. venv\Scripts\Activate.ps1
+3. python -m pip install -r requirements.txt
+4. uvicorn app.main:app --reload
 
 ## API Docs
 http://127.0.0.1:8000/docs
