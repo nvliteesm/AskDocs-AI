@@ -1,304 +1,222 @@
+from typing import Optional
 from uuid import UUID
 
 from fastapi import APIRouter, HTTPException
+from pydantic import BaseModel
 
 from app.db.supabase import supabase
-from app.models.evaluation import (
-    EvaluationRunRequest,
-    EvaluationRunResponse,
-    EvaluationTestCaseCreate,
-)
-from app.rag.generator import generate_answer
-from app.rag.prompts import build_grounded_prompt
-from app.rag.response_utils import calculate_confidence, format_sources
-from app.rag.retriever import retrieve_relevant_chunks
+from app.api.routes.chat import ask_question
+from app.models.chat import ChatRequest
+
 
 router = APIRouter()
 
 
-@router.post("/test-cases")
-def create_test_case(payload: EvaluationTestCaseCreate):
-    validate_uuid(payload.document_id, "Invalid document ID format.")
+class EvaluationCreateRequest(BaseModel):
+    document_id: Optional[str] = None
+    question: str
+    expected_answer: Optional[str] = None
+    notes: Optional[str] = None
 
-    if not payload.question.strip():
+
+class EvaluationUpdateRequest(BaseModel):
+    question: Optional[str] = None
+    expected_answer: Optional[str] = None
+    status: Optional[str] = None
+    notes: Optional[str] = None
+
+
+class EvaluationRunRequest(BaseModel):
+    test_id: str
+
+
+VALID_STATUSES = {"not_run", "passed", "failed", "needs_review"}
+
+
+def validate_uuid(value: str, field_name: str):
+    try:
+        UUID(value)
+    except ValueError:
+        raise HTTPException(status_code=400, detail=f"Invalid {field_name} format.")
+
+
+@router.get("/tests")
+def get_evaluation_tests(document_id: Optional[str] = None):
+    query = (
+        supabase
+        .table("evaluation_tests")
+        .select("*")
+        .order("created_at", desc=True)
+    )
+
+    if document_id:
+        validate_uuid(document_id, "document_id")
+        query = query.eq("document_id", document_id)
+
+    response = query.execute()
+    return response.data
+
+
+@router.post("/tests")
+def create_evaluation_test(request: EvaluationCreateRequest):
+    question = request.question.strip()
+
+    if not question:
         raise HTTPException(status_code=400, detail="Question cannot be empty.")
 
-    if payload.expected_behavior not in ["answer", "refuse"]:
-        raise HTTPException(
-            status_code=400,
-            detail="Expected behavior must be either 'answer' or 'refuse'.",
+    if request.document_id:
+        validate_uuid(request.document_id, "document_id")
+
+        document_response = (
+            supabase
+            .table("documents")
+            .select("id")
+            .eq("id", request.document_id)
+            .limit(1)
+            .execute()
         )
 
-    document = get_document(payload.document_id)
+        if not document_response.data:
+            raise HTTPException(status_code=404, detail="Document not found.")
 
-    if not document:
-        raise HTTPException(status_code=404, detail="Document not found.")
-
-    response = (
-        supabase
-        .table("evaluation_test_cases")
-        .insert({
-            "document_id": payload.document_id,
-            "question": payload.question.strip(),
-            "expected_behavior": payload.expected_behavior,
-            "expected_keywords": payload.expected_keywords,
-            "expected_pages": payload.expected_pages,
-        })
-        .execute()
-    )
-
-    if not response.data:
-        raise HTTPException(status_code=500, detail="Failed to create evaluation test case.")
-
-    return response.data[0]
-
-
-@router.get("/test-cases")
-def list_test_cases(document_id: str):
-    validate_uuid(document_id, "Invalid document ID format.")
-
-    response = (
-        supabase
-        .table("evaluation_test_cases")
-        .select("*")
-        .eq("document_id", document_id)
-        .order("created_at", desc=True)
-        .execute()
-    )
-
-    return response.data or []
-
-
-@router.delete("/test-cases/{test_case_id}")
-def delete_test_case(test_case_id: str):
-    validate_uuid(test_case_id, "Invalid test case ID format.")
-
-    response = (
-        supabase
-        .table("evaluation_test_cases")
-        .delete()
-        .eq("id", test_case_id)
-        .execute()
-    )
-
-    if not response.data:
-        raise HTTPException(status_code=404, detail="Evaluation test case not found.")
-
-    return {"message": "Evaluation test case deleted successfully."}
-
-
-@router.post("/run", response_model=EvaluationRunResponse)
-def run_evaluation(payload: EvaluationRunRequest):
-    validate_uuid(payload.document_id, "Invalid document ID format.")
-
-    document = get_document(payload.document_id)
-
-    if not document:
-        raise HTTPException(status_code=404, detail="Document not found.")
-
-    test_cases_response = (
-        supabase
-        .table("evaluation_test_cases")
-        .select("*")
-        .eq("document_id", payload.document_id)
-        .order("created_at", desc=False)
-        .execute()
-    )
-
-    test_cases = test_cases_response.data or []
-
-    if not test_cases:
-        return {"results": []}
-
-    results = []
-
-    for test_case in test_cases:
-        result = run_single_test_case(test_case)
-        saved_result = save_evaluation_result(result)
-        results.append(saved_result)
-
-    return {"results": results}
-
-
-@router.get("/runs")
-def list_runs(document_id: str):
-    validate_uuid(document_id, "Invalid document ID format.")
-
-    response = (
-        supabase
-        .table("evaluation_runs")
-        .select("*")
-        .eq("document_id", document_id)
-        .order("created_at", desc=True)
-        .execute()
-    )
-
-    return response.data or []
-
-
-def run_single_test_case(test_case: dict) -> dict:
-    question = test_case["question"]
-    document_id = test_case["document_id"]
-    expected_behavior = test_case["expected_behavior"]
-    expected_keywords = test_case.get("expected_keywords") or []
-    expected_pages = test_case.get("expected_pages") or []
-
-    chunks = retrieve_relevant_chunks(
-        question=question,
-        document_id=document_id,
-        match_count=5,
-    )
-
-    confidence, confidence_reason = calculate_confidence(chunks)
-    sources = format_sources(chunks)
-
-    if not chunks or confidence == "not_found":
-        answer = "I could not find this information in the uploaded document."
-        actual_behavior = "refuse"
-    else:
-        prompt = build_grounded_prompt(
-            question=question,
-            chunks=chunks,
-        )
-        answer = generate_answer(prompt)
-        actual_behavior = detect_actual_behavior(answer)
-
-    retrieval_hit = check_retrieval_hit(
-        sources=sources,
-        expected_pages=expected_pages,
-    )
-
-    keyword_hit = check_keyword_hit(
-        answer=answer,
-        expected_keywords=expected_keywords,
-        expected_behavior=expected_behavior,
-    )
-
-    passed = calculate_passed(
-        expected_behavior=expected_behavior,
-        actual_behavior=actual_behavior,
-        retrieval_hit=retrieval_hit,
-        keyword_hit=keyword_hit,
-        expected_pages=expected_pages,
-        expected_keywords=expected_keywords,
-    )
-
-    return {
-        "document_id": document_id,
-        "test_case_id": test_case["id"],
+    payload = {
+        "document_id": request.document_id,
         "question": question,
-        "expected_behavior": expected_behavior,
-        "actual_behavior": actual_behavior,
-        "passed": passed,
-        "retrieval_hit": retrieval_hit,
-        "keyword_hit": keyword_hit,
-        "confidence": confidence,
-        "confidence_reason": confidence_reason,
-        "answer": answer,
-        "sources": sources,
+        "expected_answer": request.expected_answer,
+        "notes": request.notes,
+        "status": "not_run",
     }
 
-
-def save_evaluation_result(result: dict) -> dict:
     response = (
         supabase
-        .table("evaluation_runs")
-        .insert(result)
+        .table("evaluation_tests")
+        .insert(payload)
         .execute()
     )
-
-    if not response.data:
-        raise HTTPException(status_code=500, detail="Failed to save evaluation result.")
 
     return response.data[0]
 
 
-def check_retrieval_hit(sources: list[dict], expected_pages: list[int]) -> bool:
-    if not expected_pages:
-        return True
+@router.patch("/tests/{test_id}")
+def update_evaluation_test(test_id: str, request: EvaluationUpdateRequest):
+    validate_uuid(test_id, "test_id")
 
-    source_pages = {
-        source.get("page_number")
-        for source in sources
-        if source.get("page_number") is not None
-    }
+    update_data = {}
 
-    return any(page in source_pages for page in expected_pages)
+    if request.question is not None:
+        question = request.question.strip()
+        if not question:
+            raise HTTPException(status_code=400, detail="Question cannot be empty.")
+        update_data["question"] = question
 
+    if request.expected_answer is not None:
+        update_data["expected_answer"] = request.expected_answer
 
-def check_keyword_hit(
-    answer: str,
-    expected_keywords: list[str],
-    expected_behavior: str,
-) -> bool:
-    if expected_behavior == "refuse":
-        return True
+    if request.status is not None:
+        if request.status not in VALID_STATUSES:
+            raise HTTPException(status_code=400, detail="Invalid evaluation status.")
+        update_data["status"] = request.status
 
-    if not expected_keywords:
-        return True
+    if request.notes is not None:
+        update_data["notes"] = request.notes
 
-    normalized_answer = answer.lower()
+    if not update_data:
+        raise HTTPException(status_code=400, detail="No fields to update.")
 
-    return any(
-        keyword.lower() in normalized_answer
-        for keyword in expected_keywords
-    )
-
-
-def calculate_passed(
-    expected_behavior: str,
-    actual_behavior: str,
-    retrieval_hit: bool,
-    keyword_hit: bool,
-    expected_pages: list[int],
-    expected_keywords: list[str],
-) -> bool:
-    if expected_behavior == "refuse":
-        return actual_behavior == "refuse"
-
-    if actual_behavior != "answer":
-        return False
-
-    if expected_pages and not retrieval_hit:
-        return False
-
-    if expected_keywords and not keyword_hit:
-        return False
-
-    return True
-
-
-def detect_actual_behavior(answer: str) -> str:
-    normalized_answer = answer.strip().lower()
-
-    refusal_phrases = [
-        "i could not find this information in the uploaded document",
-        "not found in the uploaded document",
-        "the document does not contain",
-        "the context does not provide",
-    ]
-
-    if any(phrase in normalized_answer for phrase in refusal_phrases):
-        return "refuse"
-
-    return "answer"
-
-
-def get_document(document_id: str):
     response = (
         supabase
-        .table("documents")
-        .select("id")
-        .eq("id", document_id)
+        .table("evaluation_tests")
+        .update(update_data)
+        .eq("id", test_id)
+        .execute()
+    )
+
+    if not response.data:
+        raise HTTPException(status_code=404, detail="Evaluation test not found.")
+
+    return response.data[0]
+
+
+@router.delete("/tests/{test_id}")
+def delete_evaluation_test(test_id: str):
+    validate_uuid(test_id, "test_id")
+
+    response = (
+        supabase
+        .table("evaluation_tests")
+        .delete()
+        .eq("id", test_id)
+        .execute()
+    )
+
+    if not response.data:
+        raise HTTPException(status_code=404, detail="Evaluation test not found.")
+
+    return {"message": "Evaluation test deleted successfully."}
+
+
+@router.post("/run")
+def run_evaluation_test(request: EvaluationRunRequest):
+    validate_uuid(request.test_id, "test_id")
+
+    test_response = (
+        supabase
+        .table("evaluation_tests")
+        .select("*")
+        .eq("id", request.test_id)
         .limit(1)
         .execute()
     )
 
-    return response.data[0] if response.data else None
+    if not test_response.data:
+        raise HTTPException(status_code=404, detail="Evaluation test not found.")
 
+    test = test_response.data[0]
 
-def validate_uuid(value: str, error_message: str):
     try:
-        UUID(value)
-    except ValueError:
-        raise HTTPException(status_code=400, detail=error_message)
+        chat_response = ask_question(
+            ChatRequest(
+                question=test["question"],
+                document_id=test.get("document_id"),
+            )
+        )
+    except Exception as error:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to generate answer for evaluation test: {str(error)}"
+        )
+
+    if isinstance(chat_response, dict):
+        answer = chat_response.get("answer", "")
+        confidence = chat_response.get("confidence")
+        confidence_reason = chat_response.get("confidence_reason")
+        sources = chat_response.get("sources") or chat_response.get("citations") or []
+    else:
+        answer = getattr(chat_response, "answer", "")
+        confidence = getattr(chat_response, "confidence", None)
+        confidence_reason = getattr(chat_response, "confidence_reason", None)
+        sources = getattr(chat_response, "sources", []) or []
+
+    update_payload = {
+        "generated_answer": answer,
+        "confidence": confidence,
+        "confidence_reason": confidence_reason,
+        "source_count": len(sources),
+        "status": "needs_review",
+    }
+
+    update_response = (
+        supabase
+        .table("evaluation_tests")
+        .update(update_payload)
+        .eq("id", request.test_id)
+        .execute()
+    )
+
+    if not update_response.data:
+        raise HTTPException(
+            status_code=500,
+            detail="Evaluation result could not be saved."
+        )
+
+    return update_response.data[0]

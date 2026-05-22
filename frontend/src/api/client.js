@@ -53,3 +53,37 @@ export async function clearChatHistory(documentId) {
 
   return response.data;
 }
+
+export async function getEvaluationTests(documentId) {
+  const params = documentId ? `?document_id=${documentId}` : "";
+
+  const response = await api.get(`/evaluation/tests${params}`);
+
+  return response.data;
+}
+
+export async function createEvaluationTest(payload) {
+  const response = await api.post("/evaluation/tests", payload);
+
+  return response.data;
+}
+
+export async function updateEvaluationTest(testId, payload) {
+  const response = await api.patch(`/evaluation/tests/${testId}`, payload);
+
+  return response.data;
+}
+
+export async function deleteEvaluationTest(testId) {
+  const response = await api.delete(`/evaluation/tests/${testId}`);
+
+  return response.data;
+}
+
+export async function runEvaluationTest(testId) {
+  const response = await api.post("/evaluation/run", {
+    test_id: testId,
+  });
+
+  return response.data;
+}

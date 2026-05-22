@@ -8,6 +8,7 @@ import {
   clearChatHistory,
 } from "./api/client";
 import Sidebar from "./components/sidebar";
+import EvaluationPanel from "./components/evaluationPanel";
 import ChatHistory from "./components/chatHistory";
 import UploadBox from "./components/uploadBox";
 import ChatPanel from "./components/chatPanel";
@@ -309,6 +310,10 @@ function App() {
                     confidenceReason={confidenceReason}
                     sources={sources}
                   />
+
+                  <div className="mt-6">
+                    <EvaluationPanel selectedDocument={selectedDocument} />
+                  </div>
 
                   <ChatHistory
                     messages={chatHistory}
