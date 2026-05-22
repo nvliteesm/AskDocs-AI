@@ -1,9 +1,9 @@
 from uuid import UUID
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
 
 from app.db.supabase import supabase
-from app.models.chat import ChatRequest, ChatResponse
+from app.models.chat import ChatRequest, ChatResponse, ChatHistoryResponse
 from app.rag.generator import generate_answer
 from app.rag.prompts import build_grounded_prompt
 from app.rag.retriever import retrieve_relevant_chunks
@@ -21,10 +21,7 @@ def ask_question(request: ChatRequest):
     document_metadata = None
 
     if request.document_id:
-        try:
-            UUID(request.document_id)
-        except ValueError:
-            raise HTTPException(status_code=400, detail="Invalid document ID format.")
+        validate_document_id(request.document_id)
 
         document_response = (
             supabase
@@ -51,12 +48,20 @@ def ask_question(request: ChatRequest):
             "page count",
         ]
     ):
-        return {
+        response_data = {
             "answer": f"This document has {document_metadata['total_pages']} pages.",
             "confidence": "high",
             "confidence_reason": "The answer comes directly from the stored document metadata.",
             "sources": [],
         }
+
+        save_chat_message(
+            document_id=request.document_id,
+            question=question,
+            response_data=response_data,
+        )
+
+        return response_data
 
     chunks = retrieve_relevant_chunks(
         question=question,
@@ -67,20 +72,38 @@ def ask_question(request: ChatRequest):
     confidence, confidence_reason = calculate_confidence(chunks)
 
     if not chunks:
-        return {
+        response_data = {
             "answer": "I could not find this information in the uploaded document.",
             "confidence": confidence,
             "confidence_reason": confidence_reason,
             "sources": [],
         }
 
+        save_chat_message(
+            document_id=request.document_id,
+            question=question,
+            response_data=response_data,
+        )
+
+        return response_data
+
+    formatted_sources = format_sources(chunks)
+
     if confidence == "not_found":
-        return {
+        response_data = {
             "answer": "I could not find this information in the uploaded document.",
             "confidence": confidence,
             "confidence_reason": confidence_reason,
-            "sources": format_sources(chunks),
+            "sources": formatted_sources,
         }
+
+        save_chat_message(
+            document_id=request.document_id,
+            question=question,
+            response_data=response_data,
+        )
+
+        return response_data
 
     prompt = build_grounded_prompt(
         question=question,
@@ -89,12 +112,105 @@ def ask_question(request: ChatRequest):
 
     answer = generate_answer(prompt)
 
-    return {
+    response_data = {
         "answer": answer,
         "confidence": confidence,
         "confidence_reason": confidence_reason,
-        "sources": format_sources(chunks),
+        "sources": formatted_sources,
     }
+
+    save_chat_message(
+        document_id=request.document_id,
+        question=question,
+        response_data=response_data,
+    )
+
+    return response_data
+
+
+@router.get("/history", response_model=ChatHistoryResponse)
+def get_chat_history(document_id: str | None = Query(default=None)):
+    if document_id:
+        validate_document_id(document_id)
+
+        response = (
+            supabase
+            .table("chat_messages")
+            .select("*")
+            .eq("document_id", document_id)
+            .order("created_at", desc=True)
+            .limit(30)
+            .execute()
+        )
+    else:
+        response = (
+            supabase
+            .table("chat_messages")
+            .select("*")
+            .is_("document_id", "null")
+            .order("created_at", desc=True)
+            .limit(30)
+            .execute()
+        )
+
+    return {
+        "messages": response.data or []
+    }
+
+
+@router.delete("/history")
+def clear_chat_history(document_id: str | None = Query(default=None)):
+    if document_id:
+        validate_document_id(document_id)
+
+        (
+            supabase
+            .table("chat_messages")
+            .delete()
+            .eq("document_id", document_id)
+            .execute()
+        )
+    else:
+        (
+            supabase
+            .table("chat_messages")
+            .delete()
+            .is_("document_id", "null")
+            .execute()
+        )
+
+    return {
+        "message": "Chat history cleared."
+    }
+
+
+def validate_document_id(document_id: str):
+    try:
+        UUID(document_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid document ID format.")
+
+
+def save_chat_message(document_id: str | None, question: str, response_data: dict):
+    """
+    Save a completed Q&A pair.
+
+    History saving should not block the main answer flow.
+    If saving fails, the user should still receive the generated answer.
+    """
+    try:
+        supabase.table("chat_messages").insert(
+            {
+                "document_id": document_id,
+                "question": question,
+                "answer": response_data["answer"],
+                "confidence": response_data["confidence"],
+                "confidence_reason": response_data["confidence_reason"],
+                "sources": response_data["sources"],
+            }
+        ).execute()
+    except Exception as error:
+        print(f"Failed to save chat message: {error}")
 
 
 def calculate_confidence(chunks: list[dict]) -> tuple[str, str]:

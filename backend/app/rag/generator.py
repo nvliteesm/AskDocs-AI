@@ -23,7 +23,7 @@ def generate_answer(prompt: str) -> str:
     except errors.ServerError:
         raise HTTPException(
             status_code=503,
-            detail="Gemini is currently unavailable due to high demand. Please try again later.",
+            detail="AI is currently unavailable due to high demand. Please try again later.",
         )
 
     except errors.APIError as error:

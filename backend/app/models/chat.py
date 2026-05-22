@@ -21,3 +21,18 @@ class ChatResponse(BaseModel):
     sources: List[SourcePreview]
     confidence: str
     confidence_reason: str
+
+
+class ChatHistoryItem(BaseModel):
+    id: str
+    document_id: Optional[str] = None
+    question: str
+    answer: str
+    confidence: str
+    confidence_reason: str
+    sources: List[SourcePreview]
+    created_at: str
+
+
+class ChatHistoryResponse(BaseModel):
+    messages: List[ChatHistoryItem]
