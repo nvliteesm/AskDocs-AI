@@ -151,10 +151,6 @@ Screenshots are intentionally left as placeholders until captured from a current
 
 See [docs/supabase-setup.md](docs/supabase-setup.md) for the inferred schema, cascade relationships, pgvector index, and `match_document_chunks` RPC required by the current backend.
 
-## Demo Script
-
-See [docs/demo-script.md](docs/demo-script.md) for a short 60-90 second portfolio video flow.
-
 ## Current Limitations
 
 - PDF extraction is text-based. Scanned or image-only PDFs need OCR, which is not implemented.
@@ -172,6 +168,3 @@ See [docs/demo-script.md](docs/demo-script.md) for a short 60-90 second portfoli
 - Add authentication and user-level document separation if deployed beyond a portfolio demo.
 - Harden production configuration, including CORS and secret management.
 
-## Suggested GitHub Topics
-
-`rag`, `fastapi`, `react`, `supabase`, `pgvector`, `gemini`, `document-ai`, `portfolio-project`

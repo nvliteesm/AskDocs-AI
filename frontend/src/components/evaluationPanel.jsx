@@ -71,6 +71,7 @@ function EvaluationPanel({ selectedDocument }) {
             "Failed to run evaluation test."
         );
     } finally {
+        setLoadingTests(false);
         setRunningId(null);
     }
   }
